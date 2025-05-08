@@ -10,4 +10,6 @@ python-dotenv==1.0.0
 validators==0.22.0
 ratelimit==2.2.1
 tiktoken
-
+robotexclusionrulesparser==1.7.1
+numpy==2.0.2
+google_generativeai==0.8.5

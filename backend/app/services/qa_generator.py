@@ -8,6 +8,8 @@ from dotenv import load_dotenv
 import json
 import tiktoken
 import numpy as np
+import google.generativeai as genai
+import re
 
 # Load environment variables
 load_dotenv()
@@ -16,55 +18,92 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+def count_tokens(text: str) -> int:
+    """Simple token counting function for Gemini.
+    This is a rough approximation based on word boundaries and punctuation."""
+    # Split by whitespace and punctuation
+    tokens = re.findall(r"\b\w+\b|[^\w\s]", text)
+    return len(tokens)
+
+
 @dataclass
 class QAGeneratorConfig:
     """Configuration for Q&A generation."""
-    model: str = "gpt-4o"  # Changed to more reliable model
+
+    model: str = os.getenv("OPENAI_MODEL_NAME") or os.getenv("GOOGLE_MODEL_NAME")
     max_tokens: int = 4000
     temperature: float = 0.7
     chunk_size: int = 2000
     num_questions_per_chunk: int = 5
     minimum_confidence_score: float = 0.7
 
+
 class QAGenerator:
-    """Service for generating Q&A pairs using OpenAI."""
+    """Service for generating Q&A pairs using AI."""
     
     def __init__(self, config: Optional[QAGeneratorConfig] = None):
         self.config = config or QAGeneratorConfig()
         self.openai_api_key = os.getenv("OPENAI_API_KEY")
-        if not self.openai_api_key:
-            raise ValueError("OpenAI API key not found in environment variables")
-        self.client = AsyncOpenAI(api_key=self.openai_api_key)
-        self.encoding = tiktoken.encoding_for_model(self.config.model)
-    
+        self.google_api_key = os.getenv("GOOGLE_API_KEY")
+        if not self.openai_api_key and not self.google_api_key:
+            raise ValueError("API key not found in environment variables")
+
+        if self.openai_api_key:
+            self.client = AsyncOpenAI(api_key=self.openai_api_key)
+            self.encoding = tiktoken.encoding_for_model(self.config.model)  
+        elif self.google_api_key:
+            genai.configure(api_key=self.google_api_key)
+            self.model = genai.GenerativeModel(self.config.model)
+
     def _chunk_content(self, text: str) -> List[str]:
         """Split content into chunks based on token limit."""
         if not text:
             return []
-            
-        tokens = self.encoding.encode(text)
+        
         chunks = []
         current_chunk = []
         current_length = 0
         
-        for token in tokens:
-            if current_length + 1 <= self.config.chunk_size:
-                current_chunk.append(token)
-                current_length += 1
-            else:
+        if self.openai_api_key:
+            tokens = self.encoding.encode(text)
+            
+            for token in tokens:
+                if current_length + 1 <= self.config.chunk_size:
+                    current_chunk.append(token)
+                    current_length += 1
+                else:
+                    chunks.append(self.encoding.decode(current_chunk))
+                    current_chunk = [token]
+                    current_length = 1
+        
+            if current_chunk:
                 chunks.append(self.encoding.decode(current_chunk))
-                current_chunk = [token]
-                current_length = 1
-        
-        if current_chunk:
-            chunks.append(self.encoding.decode(current_chunk))
-        
+
+        elif self.google_api_key:
+            # Simple chunking by sentences
+            sentences = re.split(r"(?<=[.!?])\s+", text)
+            
+            for sentence in sentences:
+                sentence_tokens = count_tokens(sentence)
+                if current_length + sentence_tokens <= self.config.chunk_size:
+                    current_chunk.append(sentence)
+                    current_length += sentence_tokens
+                else:
+                    if current_chunk:
+                        chunks.append(" ".join(current_chunk))
+                    current_chunk = [sentence]
+                    current_length = sentence_tokens
+
+            if current_chunk:
+                chunks.append(" ".join(current_chunk))
+
         return chunks
 
     def _generate_qa_prompt(self, content: str) -> str:
         """Generate prompt for Q&A generation."""
         return (
-            f"Based on the following content, create {self.config.num_questions_per_chunk} question-answer pairs. "
+            f"Based on the following content, create {self.config.num_questions_per_chunk} question-answer pairs in same language as the content. "
             f"Return only a pure JSON object without any markdown formatting or code blocks, using this exact structure:\n"
             f'{{"qa_pairs": [\n'
             f'    {{"question": "<question text>",\n'
@@ -102,21 +141,40 @@ class QAGenerator:
         try:
             logger.info(f"Generating Q&A pairs for chunk of length {len(chunk)}")
             
-            response = await self.client.chat.completions.create(
-                model=self.config.model,
-                messages=[
-                    {
-                        "role": "system", 
-                        "content": "You are an expert at creating question-answer pairs. Always respond with a pure JSON object, without any markdown formatting or code blocks."
-                    },
-                    {"role": "user", "content": self._generate_qa_prompt(chunk)}
-                ],
-                temperature=self.config.temperature,
-                max_tokens=self.config.max_tokens
-            )
+            if self.openai_api_key:
+                response = await self.client.chat.completions.create(
+                    model=self.config.model,
+                    messages=[
+                        {
+                            "role": "system", 
+                            "content": "You are an expert at creating question-answer pairs. Always respond with a pure JSON object, without any markdown formatting or code blocks."
+                        },
+                        {"role": "user", "content": self._generate_qa_prompt(chunk)}
+                    ],
+                    temperature=self.config.temperature,
+                    max_tokens=self.config.max_tokens
+                )
+                # Get and clean the content
+                content = response.choices[0].message.content    
             
-            # Get and clean the content
-            content = response.choices[0].message.content
+            elif self.google_api_key:
+                # Create chat session
+                chat = self.model.start_chat(history=[])
+                # Add system message
+                chat.send_message(
+                    "You are an expert at creating question-answer pairs. Always respond with a pure JSON object, without any markdown formatting or code blocks."
+                )
+                # Generate Q&A pairs
+                response = chat.send_message(
+                    self._generate_qa_prompt(chunk),
+                    generation_config=genai.types.GenerationConfig(
+                        temperature=self.config.temperature,
+                        max_output_tokens=self.config.max_tokens,
+                    ),
+                )
+                # Get and clean the content
+                content = response.text
+                
             logger.info(f"Raw API response: {content}")
             
             cleaned_content = self._clean_json_response(content)

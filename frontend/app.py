@@ -1,5 +1,5 @@
 # frontend/app.py
-from typing import List, Dict, Optional  
+from typing import List, Dict, Optional
 import streamlit as st
 import requests
 import json
@@ -96,7 +96,14 @@ class APIClient:
         except Exception as e:
             raise Exception(f"Error in scrape_url: {str(e)}")
     
-    # frontend/app.py
+    @staticmethod
+    def get_qa_pairs(job_id: int) -> list:
+        """Get Q&A pairs for a specific job."""
+        response = requests.get(f"{API_BASE_URL}/qa/{job_id}")
+        if response.status_code == 200:
+            return response.json()
+        raise Exception(f"Error getting Q&A pairs: {response.text}")
+    
     @staticmethod
     def generate_qa(job_id: int, num_pairs: int, min_confidence: float) -> dict:
         response = requests.post(
@@ -220,7 +227,14 @@ def show_results(job_id: int, qa_pairs: list):
     tabs = st.tabs(["Q&A Pairs 💭", "Statistics 📈", "Downloads ⬇️"])
     
     with tabs[0]:
+        # Convert to DataFrame and ensure proper data types
         df = pd.DataFrame(qa_pairs)
+        # Convert columns to appropriate types
+        df["question"] = df["question"].astype(str)
+        df["answer"] = df["answer"].astype(str)
+        df["confidence_score"] = pd.to_numeric(df["confidence_score"], errors="coerce")
+        df["category"] = df["category"].astype(str)
+
         st.dataframe(
             df[["question", "answer", "confidence_score", "category"]],
             hide_index=True,
@@ -312,7 +326,8 @@ def main():
     
     if selected_job_id:
         st.info("Loading existing job results...")
-        show_results(selected_job_id, [])
+        qa_pairs = APIClient.get_qa_pairs(selected_job_id)
+        show_results(selected_job_id, qa_pairs)
     else:
         url, config = show_url_input()
         generate_markdown, generate_pdf, num_qa_pairs, min_confidence = show_conversion_options()

@@ -10,6 +10,24 @@ import logging
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+@router.get("/{job_id}")
+async def get_qa_pairs(
+    job_id: int,
+    db: Session = Depends(get_db)
+):
+    """
+    Get Q&A pairs for a specific job.
+    """
+    try:
+        # Get Q&A pairs from database
+        qa_pairs = crud_qa.get_by_job_id(db, job_id)
+        if not qa_pairs:
+            raise HTTPException(status_code=404, detail="No Q&A pairs found")
+        
+        return qa_pairs
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.post("/generate/{job_id}")
 async def generate_qa_pairs(
     job_id: int,
